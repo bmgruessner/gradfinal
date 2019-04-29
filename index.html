@@ -1,0 +1,1634 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+div.absolute 
+{
+  position: absolute;
+  top: 400px;
+  left: 680px;
+  width: 1200px;
+  height: 100px;
+}
+</style>
+</head>
+<meta charset="utf-8">
+<script src="https://d3js.org/d3.v5.min.js"></script>
+<html>
+<body>
+<p> <font size="2">MUTATION FUNCIONALITY VISUALIZER (MutFuncVis) </p>
+<div id="div1"></div>
+<div id="div2" class="absolute">
+    <p>Please input a mutation (ex: A578S).</p>
+    <p id="mutAnnounce">Simulated mutation: </p>
+    <input id="theInput" type="text" />
+    <button name="goButton" id="goButton"> ENTER</button>
+</div>
+<script>
+
+//Protein files to be read in
+var mutantFile="K13muts.csv";  //filename containing mutant data
+//format: csv with abbrevPosabbrev name, and "median" is function output
+var file1D= "Kelch13FASTA.txt";
+var file2D= "Kelch132DS.csv"; //filename with 2D structure
+//format: alternate line of wt sequence, line of 2D struct data
+var file3D= "Kelch133DS.csv"; //filenemae with 3D structure
+
+//Metrics Chosen in menu above
+var posMetric="tertiary"; //Current Metric for position
+var disMetric="BLOSUM"; //Current Metric for dissimilarity
+var funMetric="function"; //Current metric for function/sensitivity
+
+blosumCheat="ARNDCQEGHILKMFPSTWYVBZX*i" //Helper to parse BLOSUM table
+var aminoAcids = []; //aminoacids: holds basic data for all amino acids
+var baseFunction=0; //baseFunction: function of WT
+var BLOSUM62 = []; //Holds BLOSUM matrix
+var mutants = []; //Holds amino acid substitutions data
+var fasta1D = ""; //Holds Amino acid seq
+var clean1D=""; //will hold full sequence string for secondary (NOT same as fasta1D)
+var clean2D=""; //will hold full 2D structure string
+var legendList2D=[]; //will hold legend for 2D structures
+var structList2D=[]; //will hold list of labeled 2D features
+var structList3D=[]; //Will hold list of 3D features
+var newMut=[]; //info for simulated mutation
+
+var xDMin; //lower range of Lollipop X scale
+var xDMax; //upper range of lollipop X Scale
+var rThreshold=5.5; //Threshold for resistance
+var alreadyBrushed= false; //zoom-unzoom with brush
+
+//amino acid data and functions
+//loads amino acid csv and creates aminoacids objects
+function loadAA()
+{
+  d3.csv("aminoacidsdata.csv").then( function(data) 
+  {
+    for(a=0; a<data.length; a++)
+    {
+      data[a].aminoacid=data[a].aminoacid;  //full name of amino acid
+      data[a].letter=data[a].letter;  //letter abbrev of amino acid
+      data[a].hydrophobicity = +data[a].hydrophobicity;  //hydrophob index of aa
+      data[a].pI=+data[a].pI;  //pI of aa
+
+      //tAminoAcid: temporary aminoacid object
+      tAminoAcid= {
+        name: data[a].aminoacid,
+        pI: data[a].pI,
+        letter: data[a].letter,
+        hydroP: data[a].hydrophobicity
+      };
+      aminoAcids.push(tAminoAcid);
+    };
+    nowloadBL();
+  });
+};
+
+//finds alteration to pI casued by mutation
+function pIChange(wt, mut) 
+{
+
+  var pI1;
+  var pI2;
+  for (var a=0; a<aminoAcids.length; a++)
+  {
+    if (wt==aminoAcids[a].letter)
+    {
+      pI1=aminoAcids[a].pI;
+    }
+    if(mut==aminoAcids[a].letter)
+    {
+      pI2=aminoAcids[a].pI;
+    }
+  }
+  return pI2-pI1;
+}
+
+//finds alteration to hydrophobicity casued by mutation
+function hPChange(wt, mut) 
+{
+  var hP1;
+  var hP2;
+  for (var a=0; a<aminoAcids.length; a++)
+  {
+    if (wt==aminoAcids[a].letter)
+    {
+      hP1=aminoAcids[a].hydroP;
+    }
+    if(mut==aminoAcids[a].letter)
+    {
+      hP2=aminoAcids[a].hydroP;
+    }
+  }
+  return hP2-hP1;
+}
+
+//BLOSUM data and functions
+//reads in BLOSUM matrix into BLOSUM object
+function nowloadBL()
+{
+  d3.csv("BLOSUM.csv").then(function(data)
+  {
+    data.forEach(function(d)
+    {
+      //BLOSUM62: 2D array [a][b], format [a]: letter in BLOSUMCheat
+      //[a][b] letter vs letter in BLOSUM2Cheat, value=score
+      //[a][-1]: id of [a] letter
+      BLOSUM62.push(
+      [+d.A, +d.R, +d.N, +d.D, +d.C, +d.Q, +d.E, +d.G,
+      +d.H, +d.I, +d.L, +d.K, +d.M, +d.F, +d.P, +d.S,
+      +d.T, +d.W, +d.Y, +d.V, +d.B, +d.Z, +d.X, d.blosum62]);
+    });
+    nowLoadMuts();
+  });
+};
+
+//function BLOSUMMat: Finds BLOSUM score
+function BLOSUMMat(wt, mut)
+{
+  //find row of values for wt amino acid
+  for (var a=0; a<BLOSUM62.length; a++)
+  {
+    if(wt==blosumCheat[a])
+    {
+      //find corresponding mut key
+      for(var b=0; b<blosumCheat.length; b++)
+      {
+        if(mut==blosumCheat[b])
+        {
+          //return value in matrix for wt vs mut BLOSUM score
+          return BLOSUM62[a][b];
+        }
+      } 
+      console.log("B search failure!"); 
+    }
+  }
+  console.log("A search failure!");
+};
+
+//Mutations data
+function nowLoadMuts()
+{
+  d3.csv(mutantFile).then(function(data)
+  {
+    data.forEach(function(d)
+    {
+      d.name= d.name;  //abbrevPOSabbrev notation of aa mutation
+      d.median= +d.median; //median is metric of function in Excel doc
+
+      if(d.name=="WT" )  //Wildtype "normal" data is a special case
+      {
+        var original="-";  
+        var position=0;
+        var mutation="-";
+        var dpI=0;
+        var dhP=0;
+        var BLOSUMScore=0;
+        baseFunction=d.median;
+        var sensitiv=0;
+      }
+      else
+      {
+        var original=d.name.slice(0,1); //WT amino acid at position
+        var position=+d.name.slice(1,-1);  //amino acid num in protein
+        var mutation=d.name.slice(-1);  //substituted amino acid
+        var dpI= pIChange(original, mutation); //change in pI
+        var dhP= hPChange(original, mutation);  //change in hydrophobicity
+        var BLOSUMScore= BLOSUMMat(original, mutation);  //BLOSUM score
+        //var sensitiv=d.median*Math.pow(2, BLOSUMScore);  alt calc, may be invalid
+        var sensitiv=(d.median-baseFunction)/(BLOSUMScore+5); //-4 is minimum BLOSUM Score
+      }
+      mutants.push({
+        name: d.name,
+        function: d.median,
+        original: original,
+        position: position,
+        mutation: mutation,
+        dpI: dpI,
+        dhP: dhP,
+        BLOSUMScore: BLOSUMScore,
+        sensitivity: sensitiv
+      });
+    });
+    nowLoad1D();
+  });
+};
+
+//Loads full 1D structure from fasta lette sequence
+function nowLoad1D()
+{
+  d3.csv(file1D).then(function(data)
+  {
+    data.forEach(function(d)
+    {
+      fasta1D=fasta1D + Object.values(d)[0];
+    });
+    nowLoad2DL();
+  });
+};
+
+//Reads in legend for 2D structure
+function nowLoad2DL()
+{
+  d3.csv("2DLegend.csv").then( function(data) 
+  {
+    data.forEach(function(d) 
+    {
+      d.letter=d.letter; //2D structure letter abbreviation
+      d.structure=d.structure; //name of 2D struct
+
+      legendList2D.push(
+      {
+        letter: d.letter,
+        structure: d.structure,
+        count: 0, //number of structures in protein (you'll see, this is gonna be great)
+        underT: 0, //number of mutants with function under threshold
+        overT: 0 //number of mutants with function over threshold
+      });
+    });
+    legendList2D.push(
+      {
+        letter: " ",
+        structure: "unstructured",
+        count: 0,
+        underT: 0,
+        overT: 0
+      });
+    nowloadM2D();
+  });
+};
+
+//Read in 2D structure and legend
+//messy2D alternates between 1D and 2D structure
+function nowloadM2D()
+{
+  var messy2D=[];
+  var messy2D2=[];
+  d3.csv(file2D).then( function(data)
+  {
+    messy2D= data.slice();
+    for(var a=0; a<messy2D.length; a++)
+    {
+      if(a % 2 ==0)
+      {
+        clean1D= String( clean1D + Object.values(messy2D[a])[0]);
+      }
+      else
+      {
+        clean2D= String( clean2D + Object.values(messy2D[a])[0]);
+      }
+    }
+
+    refine2Dstruct();
+    nowLoadM3D();
+
+    function refine2Dstruct()
+    {
+      var shiftover= fasta1D.indexOf(clean1D.slice(0,20)); //the secondary structure starts at position *shiftover* of full sequence
+      var past2D=' ' //holds onto old 2D struct, best to start as space
+      //vars to make list of structures
+      var start2D; //start of struct in amino acid pos (starts at 1!)
+      var finish2D; //end of struct in amino acid pos (starts at 1!)
+      var id2D; //letter abbrev of 2D structure
+      var structure2D; //full numbered name of a structure
+      var abbrev2D; //letter and number of a structure
+
+      //turn raw 2D structure list into refined list of structures
+      //a=0: start whatever that structure is
+      start2D=a+1;
+      id2D=clean2D[0];
+      structure2D= structName2D(id2D);   
+      for (var a=1; a<clean2D.length; a++)
+      {
+        if(past2D !=clean2D[a])  
+        {
+          //console.log("out with the old in with the new!");
+          finish2D = a;
+          structList2D.push(
+          {
+            name: structure2D,
+            start: start2D+shiftover,
+            finish: finish2D+shiftover,
+            type: id2D
+          });
+          start2D=a+1;
+          id2D=clean2D[a];
+          structure2D= structName2D(id2D);
+        }
+        //if old and new pos same letter, nothing happens
+        past2D = clean2D[a];
+      }
+      //protein ends, make last structure...
+      finish2D  = clean2D.length;
+      structList2D.push(
+      {
+        name: structure2D,
+        start: start2D+shiftover,
+        finish: finish2D+shiftover,
+        type: id2D
+      });
+    };
+  });
+};
+
+//function structName2D: finds structure name of letter
+function structName2D(abbrev)
+{
+  for (var a=0; a<legendList2D.length; a++)
+  {
+    if (abbrev==legendList2D[a].letter)
+    {
+      legendList2D[a].count= legendList2D[a].count + 1;
+      return legendList2D[a].structure + legendList2D[a].count;
+      //look, it returns the structure and gives it a number based
+      //on the count item from before!
+    }
+  }
+};
+
+//3D read-in here
+function nowLoadM3D()
+{
+d3.csv(file3D).then(function(data)
+{
+  data.forEach(function(d)
+  {
+    d.structname=d.structname;
+    d.aastart=+d.aastart;
+    d.aaend=+d.aaend;
+    structList3D.push(
+    {
+      structure3D: d.structname, //name of 3D structure
+      aastart: d.aastart, //aa start position of structure
+      aaend: d.aaend, //aa end position of structure
+      underT: 0, //number of mutants in structure under threshold
+      overT: 0 //number of mutants in structure over threshold
+    });
+  });
+  //for unstructured sections
+  /*structList3D.push(
+    {
+      structure3D: "None",
+      underT: 0,
+      overT: 0,
+      aastart: -1,
+      aaend: -1
+    });*/
+
+    //now fix up the mutants to have structure info
+    for(var a=0; a<mutants.length; a++)
+    {
+      var structure3D="None";
+      var structure="unstructured";
+      for(var b=0; b<structList3D.length; b++)
+      {
+        if( (mutants[a].position >= structList3D[b].aastart) && (mutants[a].position <= structList3D[b].aaend) )
+        {
+          structure3D= structList3D[b].structure3D;
+        }
+      }
+      for (var b=0; b<structList2D.length; b++)
+      {
+        if((mutants[a].position >= structList2D[b].start) && (mutants[a].position <= structList2D[b].finish))
+        {
+          for (var c=0; c<legendList2D.length; c++)
+          {
+            if (structList2D[b].type==legendList2D[c].letter)
+            {
+              structure=legendList2D[c].structure;
+              console.log(legendList2D.structure);
+            }
+          }
+        }
+      }
+      mutants[a].structure3D=structure3D;
+      mutants[a].structure=structure;
+    }
+  
+  nowDraw();
+});
+};
+
+function dataCheck()
+{
+  //check that all the data registers properly in the console.
+  console.log("aminoAcids");
+  console.log(aminoAcids);
+  console.log("BLOSUM62"); 
+  console.log(BLOSUM62);
+  console.log("mutants");
+  console.log(mutants);
+  console.log("sequence length:");
+  console.log(fasta1D.length);
+  console.log("clean1D");
+  console.log(clean1D);
+  console.log("clean2D");
+  console.log(clean2D);
+  console.log("legendList2D");
+  console.log(legendList2D);
+  console.log("structList2D");
+  console.log(structList2D);
+  console.log("structList3D");
+  console.log(structList3D);
+}
+
+//begin actual building here
+function nowDraw()
+{
+  function countIn() //build countlists for BarChart1
+  {
+    for (a=0; a<structList3D.length; a++)
+    {
+      structList3D[a].underT=0;
+      structList3D[a].overT=0;
+    }
+    for (a=0; a<legendList2D.length; a++)
+    {
+      legendList2D[a].underT=0;
+      legendList2D[a].overT=0;
+    }
+    //iterate through mutants
+    for (var a =0; a< mutants.length; a++)
+    {
+      var noneFound=true;
+      //crosscheck against 3D structures
+      for(var b=0; b<structList3D.length; b++)
+      {
+        if( (mutants[a].position >= structList3D[b].aastart) && (mutants[a].position <= structList3D[b].aaend) )
+        {
+          noneFound==false;
+          if ( funcMetric(mutants[a])<rThreshold)
+            structList3D[b].underT++;
+          else
+          {
+            structList3D[b].overT++;
+          }
+        }
+      }
+       /* if (noneFound==true)
+        {
+          if ( funcMetric(mutants[a])<rThreshold)
+            structList3D[structList3D.length-1].underT++;
+          else
+          {
+            structList3D[structList3D.length-1].overT++;
+          }
+        } */
+      for(var b=0; b<structList2D.length; b++)
+      {
+        //find specific 2D structure
+        if((mutants[a].position >= structList2D[b].start) && (mutants[a].position <= structList2D[b].finish))
+        {
+          //finds 2D structure type
+          for(var c=0; c<legendList2D.length; c++)
+          {
+            if (legendList2D[c].letter == structList2D[b].type)
+            {;
+              //does the threshold comp
+              if ( funcMetric(mutants[a])<rThreshold)
+              {
+                legendList2D[c].underT++;
+              }
+              else
+              {
+                legendList2D[c].overT++;
+              }
+            }
+          }
+        }
+      }
+    }
+  };
+
+  //vars for height/width of chart svgs
+  var buttonmargin=15;
+  //margin was 30
+  var margin=40; //margin
+  
+  var l1W=600; //Lollipop width,height,barchart height
+  var l1H=280;
+  var l1HG=200;
+  var b1W=350; //bar chart width, height
+  var b1H=280;
+  var b1HG=200;
+  var barwidth=20;
+  var s1W=640; //scatterplot width,height
+  var s1H=250;
+  var s1HG=200;
+  var i1W=300; //introduce mutation box width, height
+  var i1H=250;
+
+  var l1Drop=l1HG-margin;
+  var b1Drop=b1HG-margin;
+  var s1Drop=s1HG-margin;
+
+  //button area
+  var buttons1 = d3.select("#div1").append('svg')
+    .attr("width", 900)
+    .attr("height", 60)
+  //Lollipop chart space
+  var lollipop1 = d3.select("#div1").append('svg')
+    .attr("width", l1W)
+    .attr("height", l1H)
+    .attr("x", 0)
+    .attr("y", 60)
+    .on("click", changeL1Threshold);
+  //bar chart space
+  var bar1 = d3.select("#div1").append('svg')
+    .attr("width", b1W)
+    .attr("height", b1H)
+    .attr("x", l1W+200)
+    .attr("y", 60);
+  //scatterplot space
+  var scatter1 = d3.select("#div1").append('svg')
+    .attr("width", s1W)
+    .attr("height", s1H+60)
+    .attr("x", 0)
+    .attr("y", l1H+60)
+    .on("click", changeL1Threshold);
+
+  function makeButtons1()
+  {
+    //position
+    buttons1.append("text")
+    .attr("x",buttonmargin).attr("y",buttonmargin).text("POSITION: ");
+    buttons1.append("rect")
+    .attr('x',buttonmargin+90).attr('y', 0).attr("id", "secondary").attr("height", 20).attr("width", 100).attr("fill", "ghostwhite").attr("stroke", "black")
+    .on("click", function(){ buttonClick("secondary");} );
+    buttons1.append("text")
+    .attr("x",buttonmargin+100).attr("y",buttonmargin).text("Secondary");
+    buttons1.append("rect")
+    .attr("id", "tertiary").attr('x',buttonmargin+90).attr('y', buttonmargin+5).attr("height", 20).attr("width", 100).attr("fill", "lightcoral").attr("stroke", "black")
+    .on("click", function(){ buttonClick("tertiary");} );
+    buttons1.append("text")
+    .attr("x",buttonmargin+100).attr("y",buttonmargin+20).text("Tertiary");
+    //Dissimilarity
+    buttons1.append("text")
+    .attr("x",buttonmargin+195).attr("y",buttonmargin).text("DISSIMILARITY: ");
+    buttons1.append("rect")
+    .attr('x',buttonmargin+300).attr('y', 0).attr("id", "blosum").attr("height", 20).attr("width", 100).attr("fill", "lightcoral").attr("stroke", "black")
+    .on("click", function(){ buttonClick("BLOSUM");} );
+    buttons1.append("text")
+    .attr("x",buttonmargin+300).attr("y",buttonmargin).text("BLOSUM");
+    buttons1.append("rect")
+    .attr("id", "pka").attr('x',buttonmargin+300).attr('y', buttonmargin+5).attr("height", 20).attr("width", 100).attr("fill", "ghostwhite").attr("stroke", "black")
+    .on("click", function(){ buttonClick("pKa");} );
+    buttons1.append("text")
+    .attr("x",buttonmargin+300) .attr("y",buttonmargin+20).text("pKa");
+    buttons1.append("rect")
+    .attr("id", "hydrophob").attr('x',buttonmargin+300).attr('y', buttonmargin+25).attr("height", 20).attr("width", 100).attr("fill", "ghostwhite").attr("stroke", "black")
+    .on("click", function(){ buttonClick("hydroPhob");} );
+    buttons1.append("text")
+    .attr("x",buttonmargin+300).attr("y",buttonmargin+40).text("Hydrophobicity");
+    //function
+    buttons1.append("text")
+    .attr("x",buttonmargin+410).attr("y",buttonmargin).text("FUNCTION: ");
+    buttons1.append("rect")
+    .attr('x',buttonmargin+500).attr('y', 0).attr("id", "function").attr("height", 20).attr("width", 100).attr("fill", "lightcoral").attr("stroke", "black")
+    .on("click", function(){ buttonClick("function");} );
+    buttons1.append("text")
+    .attr("x",buttonmargin+500).attr("y",buttonmargin).text("Function");
+    buttons1.append("rect")
+    .attr("id", "sensitivity").attr('x',buttonmargin+500).attr('y', buttonmargin+5).attr("height", 20).attr("width", 100).attr("fill", "ghostwhite").attr("stroke", "black")
+    .on("click", function(){ buttonClick("sensitivity");} );
+    buttons1.append("text")
+    .attr("x",buttonmargin+500) .attr("y",buttonmargin+20).text("Sensitivity");
+    buttons1.append("circle")
+    .attr("cx", buttonmargin+600).attr("cy", 0)
+  };
+
+  function buttonClick(returnMetric) //Formats text at top
+  {
+    if (returnMetric=="tertiary")
+    {
+      posMetric="tertiary";
+      d3.select("#tertiary")
+        .style('fill', 'red');
+      d3.select("#secondary")
+        .style('fill', 'grey');
+      destroyBar1();
+      makeBar1();
+    }
+    else if (returnMetric=="secondary")
+    {
+      posMetric="secondary";
+      d3.select("#tertiary")
+        .style("fill", "ghostwhite");
+      d3.select("#secondary")
+        .style("fill", "lightcoral");
+      destroyBar1();
+      makeBar1();
+    }
+    if (returnMetric=="BLOSUM")
+    {
+      disMetric="BLOSUM";
+      d3.select("#blosum")
+        .style("fill", "lightcoral");
+      d3.select("#pka")
+        .style("fill", "ghostwhite");
+      d3.select("#hydrophob")
+        .style("fill", "ghostwhite");
+      destroyScatter1();
+      makeScatter1();
+    }
+    else if (returnMetric=="pKa")
+    {
+      disMetric="pKa";
+      d3.select("#blosum")
+        .style("fill", "ghostwhite");
+      d3.select("#pka")
+        .style("fill", "lightcoral");
+      d3.select("#hydrophob")
+        .style("fill", "ghostwhite");
+      destroyScatter1();
+      makeScatter1();
+    }
+    else if (returnMetric=="hydroPhob")
+    {
+      disMetric="hydroPhob";
+      d3.select("#blosum")
+        .style("fill", "ghostwhite");
+      d3.select("#pka")
+        .style("fill", "ghostwhite");
+      d3.select("#hydrophob")
+        .style("fill", "lightcoral");
+      destroyScatter1();
+      makeScatter1();
+    }
+    if (returnMetric=="function")
+    {
+      funMetric="function";
+      d3.select("#function")
+        .style("fill", "lightcoral");
+      d3.select("#sensitivity")
+        .style("fill", "ghostwhite");
+      destroyLollipop();
+      makeLollipop();
+      destroyBar1();
+      countIn();
+      makeBar1();
+      destroyScatter1();
+      makeScatter1();
+    }
+    else if (returnMetric=="sensitivity")
+    {
+      funMetric="sensitivity";
+      d3.select("#function")
+        .style("fill", "ghostwhite");
+      d3.select("#sensitivity")
+        .style("fill", "lightcoral");
+
+      destroyLollipop();
+      makeLollipop();
+      destroyBar1();
+      countIn();
+      makeBar1();
+      destroyScatter1();
+      makeScatter1();
+    }
+  };
+
+  //Scales
+  //Lollipop scales
+  xDMin=0; //used to resize x-scale area in brushing
+  xDMax=fasta1D.length;
+  //xDMin=500;
+  //xDMax=700;
+  var L1XScale=d3.scaleLinear()  //position scale
+    //.domain([0, fasta1D.length])
+    .domain([xDMin, xDMax])
+    .range([0, (l1W-2*margin) ]);
+
+  var L1YScale=d3.scaleLinear() //functionscale
+    .domain([0, d3.max(mutants, function(d){return d.function;})])
+    .range([l1HG-margin, 0]);
+  var L1YSScale=d3.scaleLinear()
+    .domain([d3.min(mutants, function(d){ return d.sensitivity;}), d3.max(mutants, function(d){ return d.sensitivity ;})])
+    .range([l1HG-margin, 0]);
+  var L1YScaleRev=d3.scaleLinear() //functionscale
+    .range([0, d3.max(mutants, function(d){return d.function;})])
+    .domain([l1HG-margin, 0]);
+  var L1YSScaleRev=d3.scaleLinear()
+    .range([d3.min(mutants, function(d){ return d.sensitivity;}), d3.max(mutants, function(d){ return d.sensitivity ;})])
+    .domain([l1HG-margin, 0]);
+  
+  function L1ScaleRev(avalue)  //from mouse position, finds y scale val
+  {
+    avalue=avalue-margin;
+    if (funMetric=="function")
+    {
+      return L1YScaleRev(avalue);
+    }
+    else if (funMetric=="sensitivity")
+    {
+      return L1YSScaleRev(avalue);
+    }
+  }
+
+  var L1XAx= d3.axisBottom();
+  var L1YAx= d3.axisLeft();
+
+  var colorScale2D=d3.scaleBand()
+    .domain(legendList2D.map(function(d){return d.letter;}))
+    .range([0,b1W]);
+  var colorScale3D=d3.scaleBand()
+    .domain(structList3D.map(function(d){return d.structure3D;}))
+    .range([0,b1W]);
+  
+  function brushed()
+  {
+    if (alreadyBrushed==false)
+    {
+      alreadyBrushed=true;
+      var grabEm=d3.event.selection;
+      xDMin= ( (grabEm[0]-margin)/(l1W-2*margin) )*xDMax;
+      xDMax= ( (grabEm[1]-margin)/(l1W-2*margin))*xDMax;
+      L1XScale.domain([xDMin,xDMax]);
+      destroyLollipop();
+      makeLollipop();
+    }
+    else
+    {
+      alreadyBrushed=false;
+      xDMin=0;
+      xDMax=fasta1D.length;
+      L1XScale.domain([xDMin,xDMax]);
+      destroyLollipop();
+      makeLollipop();
+    }
+  };
+
+  function makeLollipop()
+  {
+    L1XAx.scale(L1XScale);
+    yAxUse();  //Scale for L1YAx
+
+    //Brush for lollipop
+    lollipop1.append('g')
+      .attr("class", "brush")
+      .call(d3.brushX()
+        .extent([[(margin),(margin+l1Drop)],[(l1W-margin), (margin+l1Drop+70)]])
+        .on("end",brushed)); 
+
+    //Lollipop axes
+    L1XGroup = lollipop1.append('g')
+      .attr("transform", "translate( "+ margin +", "+ (l1Drop+margin) +")")
+      .call(L1XAx);
+    L1YGroup = lollipop1.append('g')
+    .attr("transform", "translate( "+ margin +", "+ margin +")")
+      .call(L1YAx);
+
+    lollipop1.append("text") //Y-Axis Label
+      .attr("y", 12)
+      .attr("x", -170)
+      .attr("transform", "rotate(-90)")
+      .text(yFuncText() );   
+
+    lollipop1.append("text")  //L1 Title
+      .attr("y",20)
+      .attr("x",200)
+      .text("Chart of function of mutations based on protein position");
+
+    //Lollipop chart lollipops
+    lollipop1.selectAll("line").select("#l")
+      .data(mutants.filter(function(m){return (m.position>=xDMin)&&(m.position<=xDMax);}))
+      .enter()
+      .append("line")
+      .attr("id", function(data){return "l"; } )
+      .attr("x1", function(data){return L1XScale(data.position)+margin; } )
+      .attr("y1", function(data){return yFuncMetric(data)+margin; })
+      .attr("y2", function(data){return l1Drop+margin; })
+      .attr("x2", function(data){return L1XScale(data.position)+margin; })
+      .style("stroke", "black");
+    lollipop1.selectAll("circle")
+      .data(mutants.filter(function(m){return (m.position>=xDMin)&&(m.position<=xDMax);}))
+      .enter()
+      .append("circle")
+      .attr("id", function (data){return data.name; } )
+      .attr("cx", function(data){return L1XScale(data.position)+margin; } )
+      .attr("cy", function(data){return yFuncMetric(data)+margin; })
+      .attr("r",5)
+      .attr("fill", function(data) {if ( funcMetric(data) < rThreshold) {return "darkslateblue";} else {return "lightcoral";} })
+      .on("mouseover", l1TooltipOn)
+      .on("mouseout", l1TooltipOff);
+    
+    //L1 threshold line
+    lollipop1.append("line")
+      .attr("id", "threshhold")
+      .attr("x1", margin)
+      .attr("x2", l1W-margin)
+      .attr("y1", function()
+      {
+        if (funMetric=="function") {return L1YScale(rThreshold)+margin;}
+        if (funMetric=="sensitivity"){return L1YSScale(rThreshold)+margin;}
+      })
+      .attr("y2", function()
+      {
+        if (funMetric=="function") {return L1YScale(rThreshold)+margin;}
+        if (funMetric=="sensitivity"){return L1YSScale(rThreshold)+margin;}
+      })
+      .style("stroke", "black")
+      .style("stroke-width", 2)
+      .attr("stroke-dasharray", "1");
+
+    //2D structure diagram
+    lollipop1.append("line")
+      .attr("id", "l12Dline")
+      .attr("x1", margin)
+      .attr("y1", l1Drop+margin+40)
+      .attr("x2", l1W-margin)
+      .attr("y2", l1Drop+margin+40)
+      .style("stroke", "black");
+
+    lollipop1.selectAll("#r2D")
+      .data( structList2D.filter(function(s){return (s.start <= xDMax) && (s.finish >= xDMin) &&(s.type !=' ') ;}) )
+      .enter()
+      .append("rect")
+      .attr("id",function(data){return "r2D";})
+      .attr("x", function(data)
+      {
+        if(data.start<xDMin)
+        {
+          return L1XScale(xDMin)+margin;
+        }
+        return L1XScale(data.start)+margin;
+      })
+      .attr("y", function(data){return l1Drop+30+margin;})
+      .attr("height", function(data){return 20;})
+      .attr("width", function(data)
+      {
+        var startpos=data.start;
+        var endpos=data.finish;
+        if(startpos<xDMin)
+        {
+          startpos=xDMin;
+        }
+        if(endpos>xDMax)
+        {
+          endpos=xDMax;
+        }
+        return L1XScale(endpos+1)-L1XScale(startpos);
+      })
+      .attr("fill", function(data){return d3.interpolatePlasma( (parseFloat(colorScale2D(data.type)/b1W)));});
+
+      //Append text to 2D structures
+      lollipop1.selectAll("#t2D")
+      .data( structList2D.filter(function(s){return (s.start <= xDMax) && (s.finish >= xDMin);}) )
+      .enter()
+      .append("text")
+      .attr("id",function(data){return "t2D";})
+      .attr("x", function(data)
+      {
+        if(data.start<xDMin)
+        {
+          return L1XScale(xDMin)+margin;
+        }
+        return L1XScale(data.start)+margin;
+      })
+      .attr("y", function(data){return l1Drop+30+margin;})
+      .attr("font-size", function(data){
+          var size=2*fasta1D.length/(xDMax-xDMin);
+          return toString(size)+"px";
+        
+      })
+      .text(function(data)
+      {
+        if (alreadyBrushed==true)
+        {
+        return data.type;
+        }
+        return "";
+      });
+      
+    //L1 3D structure diagram
+    lollipop1.append("line")
+      .attr("id", "l13Dline")
+      .attr("x1", margin)
+      .attr("y1", l1Drop+60+margin)
+      .attr("x2", l1W-2*margin)
+      .attr("y2", l1Drop+60+margin)
+      .style("stroke", "black");
+    lollipop1.selectAll("#r3D")
+      .data( structList3D.filter(function(s){return (s.aastart <= xDMax) && (s.aaend >= xDMin);}) )
+      .enter()
+      .append("rect")
+      .attr("id",function(data){return "r3D";})
+      .attr("x", function(data)
+      {
+        if(data.aastart<xDMin)
+        {
+          return margin+L1XScale(xDMin);
+        }
+        return margin + L1XScale(data.aastart);
+      })
+      .attr("y", function(data){return l1Drop+50+margin;})
+      .attr("height", 20)
+      .attr("width", function(data)
+      {
+        var startpos=data.aastart;
+        var endpos=data.aaend;
+        if(startpos<xDMin)
+        {
+          startpos=xDMin;
+        }
+        if(endpos>xDMax)
+        {
+          endpos=xDMax;
+        }
+        return L1XScale(endpos+1)-L1XScale(startpos);
+      })
+      .attr("fill", function(data){return d3.interpolatePlasma( (parseFloat(colorScale3D(data.structure3D)/b1W)));});
+
+    //text for 3D structs
+    lollipop1.selectAll("#t3D")
+      .data( structList3D.filter(function(s){return (s.aastart <= xDMax) && (s.aaend >= xDMin);}) )
+      .enter()
+      .append("text")
+      .attr("id",function(data){return "t3D";})
+      .attr("x", function(data)
+      {
+        if(data.aastart<xDMin)
+        {
+          return L1XScale(xDMin)+margin;
+        }
+        return L1XScale(data.aastart)+margin;
+      })
+      .attr("y", function(data){return l1Drop+80+margin;})
+      .attr("font-size", "7px")
+      .text(function(data){return data.structure3D;});
+
+      //append simulation rect
+      lollipop1.selectAll("#sim")
+        .data(newMut)
+        .enter()
+        .append("rect")
+          .attr("id", function (data){return "sim"; } )
+          .attr("x", function(data){
+            return L1XScale(data.position)+margin; } )
+          .attr("y", margin )
+          .attr("width", L1XScale(2)-L1XScale(1))
+          .attr("height", l1H-margin)
+          .attr("fill", "grey")
+          .attr("opacity", 0.5);
+    };
+
+  //clears old lollipop data
+  function destroyLollipop()
+  {
+    L1XGroup.remove();
+    L1YGroup.remove();
+    lollipop1.selectAll("text").remove();
+    lollipop1.selectAll("line").remove();
+    lollipop1.selectAll("rect").remove();
+    lollipop1.selectAll("circle").remove();
+  };
+
+  //Tooltip on for lollipops
+  function l1TooltipOn(obj)
+  {
+    xCoord=d3.mouse(this)[0];
+    yCoord=d3.mouse(this)[1];
+    lollipop1.append("rect")
+      .attr("id","l1Tooltip")
+      .attr("x", xCoord+10)
+      .attr("y", yCoord-12)
+      .attr("width", 40)
+      .attr("height", 15)
+      .attr("fill", "white")
+      .attr("stroke", "black")
+      .attr("opacity", 0.5);
+    lollipop1.append("line")
+      .attr("id","l1Tooltip")
+      .attr("x1", xCoord)
+      .attr("y1", yCoord)
+      .attr("x2", xCoord)
+      .attr("y2", 400)
+      .attr("stroke", "black")
+      .attr("stroke-dasharray",1);
+    lollipop1.append("text")
+      .attr("id", "l1Tooltip")
+      .attr("x", xCoord+10)
+      .attr("y", yCoord)
+      .text(obj.name);
+    highlightAll(obj);
+  };
+
+  function highlightAll(obj) //crosshighlights features
+  {
+    //colors lollipop point
+    lollipop1.select(("#"+obj.name))
+      .attr("stroke", "gold")
+      .style("stroke-width", 4);
+    //colors scatterplot point
+    scatter1.select(("#"+obj.name))
+      .attr("stroke", "gold")
+      .style("stroke-width", 4);
+
+    //colors bar chart?
+    if ((posMetric=="secondary") || (obj.structure3D !="None"))
+    {
+      bar1.append("rect")
+        .attr("id", "highlight")
+        .attr("x", b1XData(obj)+margin+tTUOX(obj)+(barwidth/2) )
+        .attr("y", B1YScale( tTUO(obj, "height") )+margin) //This works regardless of pos metric
+        .attr("width", barwidth)
+        .attr("height", B1YScale(bDomainMax-tTUO(obj, "height"))) //This works regardless of pos metric
+        .attr("fill", tTUO(obj, "fill") )
+        .attr("stroke", "gold")
+        .style("stroke-width", 4);
+    }
+  };
+
+  function tTUO(data, attribute) //Helper for Tooltip, decides whether to use under or over
+  {
+    if (posMetric=="secondary")
+    {
+      for(var a=0; a<legendList2D.length; a++)
+      {
+        if (legendList2D[a].structure==data.structure)
+        {
+          if (data.function<rThreshold)
+          {
+            if(attribute=="height") {return legendList2D[a].underT;}
+            if(attribute=="fill"){return "darkslateblue";}
+          }
+          else
+          {
+            if(attribute=="height") {return legendList2D[a].overT;}
+            if(attribute=="fill"){return "lightcoral";}
+          }          
+        }
+      }
+    }
+    else if (posMetric=="tertiary")
+    {
+      for(var a=0; a<structList3D.length; a++)
+      {
+        if (structList3D[a].structure3D==data.structure3D)
+        {
+          if (data.function<rThreshold)
+          {
+            if (attribute=="height") {console.log(structList3D[a].underT); return structList3D[a].underT;}
+            if (attribute=="fill"){return "darkslateblue";}
+          }
+          else
+          {
+            if (attribute=="height"){return structList3D[a].overT;}
+            if (attribute=="fill"){return "lightcoral";}
+          }          
+        }
+      }
+    }
+  };
+
+  function tTUOX(data) //Helper for Tooltip, decides whether to cover under or over bar
+  {
+    if (funcMetric(data)<rThreshold)
+      {
+        return 0;
+      }
+      else
+      {
+        return barwidth;
+      }
+  };
+
+  //removes l1Tooltip
+  function l1TooltipOff(obj)
+  {
+    lollipop1.selectAll("#l1Tooltip").remove();
+    lollipop1.selectAll("circle").style("stroke-width", 0);
+    bar1.selectAll("#highlight").remove();
+    scatter1.selectAll("circle").style("stroke-width", 0);
+  }
+
+  //Changes threshold line
+  function changeL1Threshold()
+  {
+    //ignore clicks outside of graph area
+    xCoord=d3.mouse(this)[0];
+    yCoord=d3.mouse(this)[1];
+    if (chartLS="lollipop")
+    {
+      if ((xCoord<margin) ||(xCoord>(l1W-margin)))
+      {
+        return;
+      }
+      if ((yCoord<margin) || (yCoord>l1Drop+margin))
+      {
+        return;
+      }
+    }
+    if (chartLS="scatter")
+    {
+      if ((xCoord<margin) ||(xCoord>(s1W-margin)))
+      {
+        return;
+      }
+      if ((yCoord<margin) || (yCoord>s1Drop+margin))
+      {
+        return;
+      }
+    }
+    rThreshold=L1ScaleRev(yCoord);
+    countIn();
+    destroyLollipop();
+    makeLollipop();
+    destroyBar1();
+    makeBar1();
+    destroyScatter1();
+    makeScatter1();
+  };
+    //For L1 Y axis, returns title
+  function yFuncText()
+  {
+    if (funMetric=="function")
+    {
+      return "Function";
+    }
+    else if (funMetric=="sensitivity")
+    {
+      return "Sensitivity";
+    }
+  };
+  
+  //Scale for Y Axis
+  function yAxUse()
+  {
+    if (funMetric=="function")
+    {
+      L1YAx.scale(L1YScale);
+    }
+    else if (funMetric=="sensitivity")
+    {
+      L1YAx.scale(L1YSScale);
+    }
+  }
+  //Returns y position for data based on metric being used
+  function yFuncMetric(obj)
+  {
+    if (funMetric=="function")
+    {
+      return L1YScale(obj.function);
+    }
+    else if (funMetric=="sensitivity")
+    {
+      return L1YSScale(obj.sensitivity);
+    }
+  }
+  
+  //Returns raw function/sensitivity info for data
+  function funcMetric(obj)
+  {
+    if (funMetric=="function")
+    {
+      return obj.function;
+    }
+    else if (funMetric=="sensitivity")
+    {
+      return obj.sensitivity;
+    }
+  }
+
+  //bar chart
+  //Scales
+  var B1XScale; //will be 3D or 2D based on posMetric
+  var B1XScale3D=d3.scaleBand();  //X scale if 3D struct used
+  var B1XScale2D=d3.scaleBand();  //X scale if 2D struct used
+  var bDomainMax; //Maximum sum of overT and underT
+  var B1YScale=d3.scaleLinear(); //Y scale, over/under threhold
+
+  var B1XAx= d3.axisBottom();
+  var B1YAx= d3.axisLeft();
+
+  //max value of data for scale
+  function b1XDomain()
+  {
+    if (posMetric=="tertiary")
+    {
+      var under= d3.max(structList3D, function(d){return d.underT;});
+      var over= d3.max(structList3D, function(d){return d.overT;});
+    }
+    else if (posMetric=="secondary")
+    {
+      var under= d3.max(legendList2D, function(d){return d.underT;});
+      var over= d3.max(legendList2D, function(d){return d.overT;});
+    }
+
+    if (under>over) {bDomainMax=under;}
+    else {bDomainMax=over;}
+  };
+
+  //which dataset to use to draw bar chart
+  function b1WhichData()
+  {
+    if (posMetric=="tertiary"){return structList3D;}
+    else if (posMetric=="secondary"){return legendList2D;}
+  };
+
+  //return x coord for data
+  function b1XData(data)
+  {
+    if (posMetric=="tertiary"){return B1XScale3D(data.structure3D);}
+    else if (posMetric=="secondary"){return B1XScale2D(data.structure);}
+  };
+  
+  //Actually makes Bar chart
+  function makeBar1()
+  {
+    //Scales
+    B1XScale3D
+      .domain( structList3D.map(function(d) { return d.structure3D;} ) )
+      .range([0, b1W-2*margin]);
+    B1XScale2D
+      .domain( legendList2D.map(function(d) { return d.structure;} ) )
+      .range([0, b1W-2*margin]);
+
+    b1XDomain(); //helps with scale domain
+    barwidth=((b1W-(2*margin))/(b1WhichData().length*3));
+    B1YScale
+      .domain([0, bDomainMax]) //bDomain Max value is handled regardless of secondary/tert metric
+      .range([b1Drop, 0]);
+
+    if (posMetric=="secondary") {B1XAx.scale(B1XScale2D);}
+    else if (posMetric=="tertiary"){B1XAx.scale(B1XScale3D);}
+    B1YAx.scale(B1YScale);
+
+    //Bar chart axis text on x axis
+    B1XGroup = bar1.append('g')
+      .attr("transform", "translate( "+ (margin) +", "+ (b1Drop+margin) +")")
+      .call(B1XAx)
+      .selectAll("text")
+      .attr("y", 1)
+        .attr("x", 2)
+        .attr("transform", "rotate(45)")
+        .style("font", "10px times")
+        .style("text-anchor", "start");
+    B1YGroup = bar1.append('g')
+    .attr("transform", "translate( "+ margin +", "+ margin +")")
+      .call(B1YAx);
+
+    //B1 rects: under threshold bars
+    bar1.selectAll("rect").select("#ru")
+      .data(b1WhichData())
+      .enter()
+      .append("rect")
+      .attr("id", function (data){return "ru"; } )
+      .attr("x", function(data){return b1XData(data)+margin+(barwidth/2); } )
+      .attr("y", function(data){return B1YScale(data.underT)+margin; }) //This works regardless of pos metric
+      .attr("width", barwidth)
+      .attr("height", function(data){return B1YScale(bDomainMax-data.underT);}) //This works regardless of pos metric
+      .attr("fill", "darkslateblue");
+    //Barchart rects: over threshold bars, side by side
+    bar1.selectAll("rect").select("#ro")
+      .data(b1WhichData())
+      .enter()
+      .append("rect")
+      .attr("id", function (data){return "ro"; } )
+      .attr("x", function(data){return b1XData(data)+margin+barwidth+(barwidth/2); } ) 
+      .attr("y", function(data){return B1YScale(data.overT)+margin; }) //This works regardless of pos metric
+      .attr("width", barwidth)
+      .attr("height", function(data){return B1YScale(bDomainMax-data.overT);}) //This works regardless of pos metric
+      .attr("fill", "lightcoral"); 
+    bar1.append("text")
+      .attr("y", 10)
+      .attr("x", -170)
+      .attr("transform", "rotate(-90)")
+      .text(yFuncText());   
+    bar1.append("text")
+      .attr("y",20)
+      .attr("x",30)
+      .text("Counts of mutants beneath and above threshold");
+    bar1.append("text")
+      .attr("y",b1H-margin/2)
+      .attr("x",b1W/3)
+      .text(function()
+      {
+        if (posMetric=="secondary") {return "Secondary structure";}
+        else if (posMetric=="tertiary") {return "Tertiary structure"}
+      });
+
+    //simulation highlighter
+    if (newMut.length != 0)
+    {
+      if ((newMut[0].structure3D != "None") || (posMetric != "tertiary"))
+      {
+        bar1.selectAll("#sim")
+          .data(newMut)
+          .enter()
+          .append("rect")
+            .attr("id", function (data){return "sim"; } )
+            .attr("x", function(data){return b1XData(data)+margin+(barwidth/2); } )
+            .attr("y", function(data){return margin; }) //This works regardless of pos metric
+            .attr("width", 2*barwidth)
+            .attr("height", b1HG-margin) //This works regardless of pos metric
+            .attr("fill", "grey")
+            .attr("opacity", 0.5);
+      }
+    } 
+  };
+
+    //clears old bar1 data
+  function destroyBar1()
+    {
+      B1XGroup.remove();
+      B1YGroup.remove();
+      bar1.selectAll("text").remove();
+      bar1.selectAll("rect").remove();
+    };
+
+  //Scatterplot scales and axis info
+
+  var S1XScaleB=d3.scaleLinear()
+    .domain([d3.min(mutants.concat(newMut), function(d){return d.BLOSUMScore;}), d3.max(mutants.concat(newMut), function(d){return d.BLOSUMScore;})])
+    .range([0, s1W-3*margin]);
+  var S1XScaleP=d3.scaleLinear()
+    .domain([d3.min(mutants.concat(newMut), function(d){return d.dpI;}), d3.max(mutants.concat(newMut), function(d){return d.dpI;})])
+    .range([0, s1W-3*margin]);
+  var S1XScaleH=d3.scaleLinear()
+    .domain([d3.min(mutants.concat(newMut), function(d){return d.dhP;}), d3.max(mutants.concat(newMut), function(d){return d.dhP;})])
+    .range([0, s1W-3*margin]);
+  var S1YScale=d3.scaleLinear()
+    .domain([0, d3.max(mutants, function(d){return d.function})])
+    .range([s1HG-margin, 0]);
+  var S1YSScale=d3.scaleLinear()
+    .domain([d3.min(mutants, function(d){ return d.sensitivity;}), d3.max(mutants, function(d){return d.sensitivity})])
+    .range([s1HG-margin, 0]);
+
+  var S1XAx= d3.axisBottom();
+  var S1YAx= d3.axisLeft();
+  
+  //sets metric for y axis
+  function sYAxUse()
+  {
+    if (funMetric=="function")
+    {
+      S1YAx.scale(S1YScale);
+    }
+    else if (funMetric=="sensitivity")
+    {
+      S1YAx.scale(S1YSScale);
+    }
+  };
+
+//sets metric for x axis
+  function sXAxUse()
+  {
+    if (disMetric=="BLOSUM"){S1XAx.scale(S1XScaleB);}
+    else if (disMetric=="pKa"){S1XAx.scale(S1XScaleP);}
+    else if (disMetric=="hydroPhob"){S1XAx.scale(S1XScaleH);}
+  };
+
+  //return data based on dissimilarity metric
+  function sXFuncMetric(obj)
+  {
+    if (disMetric=="BLOSUM"){return S1XScaleB(obj.BLOSUMScore);}
+    else if (disMetric=="pKa"){return S1XScaleP(obj.dpI);}
+    else if (disMetric=="hydroPhob"){return S1XScaleH(obj.dhP);}
+  }
+
+    //Returns y position for scatterplot for data based on metric being used
+  function sYFuncMetric(obj)
+  {
+    if (funMetric=="function")
+    {
+      return S1YScale(obj.function);
+    }
+    else if (funMetric=="sensitivity")
+    {
+      return S1YSScale(obj.sensitivity);
+    }
+  }
+  //Return function or sensitivity value
+  function sFuncMetric(obj)
+  {
+    if (funMetric=="function")
+    {
+      return obj.function;
+    }
+    else if (funMetric=="sensitivity")
+    {
+      return obj.sensitivity;
+    }
+  }
+
+  //draws the scatterplot
+  function makeScatter1()
+  {
+    S1XScaleB.domain([d3.min(mutants.concat(newMut), function(d){return d.BLOSUMScore;}), d3.max(mutants.concat(newMut), function(d){return d.BLOSUMScore;})])
+    S1XScaleP.domain([d3.min(mutants.concat(newMut), function(d){return d.dpI;}), d3.max(mutants.concat(newMut), function(d){return d.dpI;})])
+    S1XScaleH.domain([d3.min(mutants.concat(newMut), function(d){return d.dhP;}), d3.max(mutants.concat(newMut), function(d){return d.dhP;})])
+    //axes
+    sXAxUse(); //which x axis to use
+    sYAxUse(); //which y axis to use
+    //scatterplot axes
+    S1XGroup = scatter1.append('g')
+      .attr("transform", "translate( "+ (margin) +", "+ (s1Drop+margin) +")")
+      .call(S1XAx);
+    S1YGroup = scatter1.append('g')
+      .attr("transform", "translate( "+ margin +", "+ margin +")")
+      .call(S1YAx);  
+    
+    scatter1.append("text")
+      .attr("id","s1title")
+      .attr("x", s1W/2.5)
+      .attr("y", margin/2)
+      .text("Scatterplot of mutation function by dissimilarity");
+    scatter1.append("text")
+      .attr("id","s1xtitle")
+      .attr("x", s1W/2.5)
+      .attr("y", s1H-1-margin/2)
+      .attr("font-size","8px")
+      .text(function()
+      {
+        if (disMetric=="BLOSUM"){return "BLOSUM Score";}
+        else if(disMetric=="pKa"){return "Change in pKa";}
+        else if(disMetric=="hydroPhob"){return "Hydrophobicity change";}
+      });
+    scatter1.append("text") //Y-Axis Label
+      .attr("id","s1ytitle")
+      .attr("y", 12)
+      .attr("x", -170)
+      .attr("transform", "rotate(-90)")
+      .text(yFuncText() );   
+    //scatterplot dots
+    scatter1.selectAll("circle")
+      .data(mutants)
+      .enter()
+      .append("circle")
+      .attr("id", function (data){return data.name; } )
+      .attr("cx", function(data){return sXFuncMetric(data)+margin; } )
+      .attr("cy", function(data){return sYFuncMetric(data)+margin; })
+      .attr("r",5)
+      .attr("fill", function(data) {if ( sFuncMetric(data) < rThreshold) {return "darkslateblue";} else {return "lightcoral";} })
+      .on("mouseover", s1TooltipOn)
+      .on("mouseout", s1TooltipOff);
+
+    //threshold line
+    scatter1.append("line")
+      .attr("id", "threshhold")
+      .attr("x1", margin)
+      .attr("x2", s1W-2*margin)
+      .attr("y1", function()
+      {
+        if (funMetric=="function") {return S1YScale(rThreshold)+margin;}
+        if (funMetric=="sensitivity"){return S1YSScale(rThreshold)+margin;}
+      })
+      .attr("y2", function()
+      {
+        if (funMetric=="function") {return S1YScale(rThreshold)+margin;}
+        if (funMetric=="sensitivity"){return S1YSScale(rThreshold)+margin;}
+      })
+      .style("stroke", "black")
+      .attr("stroke-dasharray", "2");
+
+        //adds simulation line
+        scatter1.selectAll("#sim")
+          .data(newMut)
+          .enter()
+          .append("rect")
+            .attr("id", "sim")
+            .attr("x",function(data){return sXFuncMetric(data)+margin-5; } )
+            .attr("y", margin)
+            .attr("width", 20 )
+            .attr("height", s1Drop)
+            .attr("fill", "grey")
+            .attr("opacity", 0.5);
+    };
+
+  //clears old bar1 data
+  function destroyScatter1()
+  {
+    S1XGroup.remove();
+    S1YGroup.remove();
+    scatter1.selectAll("text").remove();
+    scatter1.selectAll("line").remove();
+    scatter1.selectAll("circle").remove();
+    scatter1.selectAll("rect").remove();
+  };
+
+  //Creates tooltip for scatterplot
+  function s1TooltipOn(obj)
+  {
+    xCoord=d3.mouse(this)[0];
+    yCoord=d3.mouse(this)[1];
+    scatter1.append("rect")
+      .attr("id","l1Tooltip")
+      .attr("x", xCoord+10)
+      .attr("y", yCoord-12)
+      .attr("width", 40)
+      .attr("height", 15)
+      .attr("fill", "white")
+      .attr("stroke", "black")
+      .attr("opacity", 0.5);
+    scatter1.append("text")
+      .attr("id", "l1Tooltip")
+      .attr("x", xCoord+10)
+      .attr("y", yCoord)
+      .text(obj.name);
+    highlightAll(obj);
+  };
+  //Removes tooltip for scatterplot
+  function s1TooltipOff(obj)
+  {
+    scatter1.selectAll("#l1Tooltip").remove();
+    lollipop1.selectAll("circle").style("stroke-width", 0);
+    bar1.selectAll("#highlight").remove();
+    scatter1.selectAll("circle").style("stroke-width", 0);
+  };
+
+  countIn();
+  dataCheck();
+  makeButtons1();
+  makeLollipop();
+  makeBar1();
+  makeScatter1();
+
+  //preps the mutation simulator
+  document.getElementById("goButton").addEventListener("click", simulate);
+  function simulate()
+  {
+    var grabInput=document.getElementById("theInput").value; //Grabinput initially takes input
+    document.getElementById("theInput").value="";
+    console.log(grabInput);
+    if(grabInput.length==0)
+    {
+      clearMut();
+      return;
+    }
+    //gets basic data for simulated mutation
+    var original= grabInput[0];
+    var mutation= grabInput.slice(-1);
+    var position=parseInt(grabInput.slice(1,-1));
+    if ((typeof original=='string') &&(typeof mutation=='string') && (typeof position=='number'))
+    {
+      var dpI= pIChange(original, mutation); //change in pI
+      var dhP= hPChange(original, mutation);  //change in hydrophobicity
+      var BLOSUMScore= BLOSUMMat(original, mutation);  //BLOSUM score
+      //find associated 2D and 3D structures
+      var structure3D="None";
+      var structure="unstructured";
+      for(var b=0; b<structList3D.length; b++)
+        {
+          if( (position >= structList3D[b].aastart) && (position <= structList3D[b].aaend) )
+          {
+            var structure3D= structList3D[b].structure3D;
+          }
+        }
+      for (var b=0; b<structList2D.length; b++)
+      {
+        if((position >= structList2D[b].start) && (position <= structList2D[b].finish))
+          {
+            for (var c=0; c<legendList2D.length; c++)
+            {
+              if (structList2D[b].type==legendList2D[c].letter)
+              {
+                var structure=legendList2D[c].structure;
+              }
+            }
+          }
+      }
+      //Replace old mutation with new
+      newMut.pop();
+      newMut.push(
+      {
+        name: grabInput,
+        original: original,
+        position: position,
+        mutation: mutation,
+        dpI: dpI,
+        dhP: dhP,
+        BLOSUMScore: BLOSUMScore,
+        structure3D: structure3D,
+        structure: structure
+      });
+
+      //Rebuild the vis
+      document.getElementById("mutAnnounce").innerHTML="Simulated mutation: "+newMut[0].name;
+      destroyLollipop();
+      makeLollipop();
+      destroyBar1();
+      makeBar1();
+      destroyScatter1();
+      makeScatter1();      
+    }
+    else
+    {
+      document.getElementById("mutAnnounce").innerHTML="Not a valid input."+newMut[0].name;
+      document.getElementById("theInput").value="";
+      return;
+    }
+  };
+  function clearMut() //Clears simulated mutation
+  {
+    lollipop1.select("#sim").remove();
+    bar1.select("#sim").remove();
+    scatter1.select("sim").remove();
+    return;
+  };
+};
+
+loadAA(); //this command actually starts the whole vis
+
+</script>
+</body>
+</html>
